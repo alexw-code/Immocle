@@ -1,0 +1,116 @@
+--- a/ImmoCle.jsx (LIGNE 2595-2650)
++++ b/ImmoCle.jsx (PATCH B1-BIS)
+
+/**
+ * Retourne l'état RÉSOLU de l'assurance locataire, incluant les états dérivés
+ * (bientot_expiree, expiree via dateFin).
+ *
++ * B1-BIS FIX: Vérifie que l'assurance est liée au tenant ACTUEL du bien.
++ * Si mismatch (ancien locataire), retourne "manquante" + flag tenantMismatch.
+ *
+ * @param {string} propId
+ * @param {object} adminGlobal
+ * @param {Date}   [nowDate]  - date de référence (pour tests), défaut = now
+- * @returns {{ statut: string, resolu: string, joursAvantFin: number|null, data: object|null }}
++ * @returns {{ statut: string, resolu: string, joursAvantFin: number|null, data: object|null, tenantMismatch?: boolean }}
+ */
+const _getAssuranceLocataireState = (propId, adminGlobal, nowDate) => {
+  const now = nowDate instanceof Date ? nowDate : new Date();
+  const data = _getAssuranceLocataire(propId, adminGlobal);
+  if (!data) {
+    return { statut: "manquante", resolu: "manquante", joursAvantFin: null, data: null };
+  }
+
++ // B1-BIS: Vérifier que l'assurance est liée au tenant ACTUEL du bien.
++ // Si mismatch (changement de locataire), retourner "manquante" mais conserver data.
++ const activeTenant = (typeof DEMO !== "undefined" && DEMO.tenants)
++   ? DEMO.tenants.find(t => t.propertyId === propId && t.status !== "archived")
++   : null;
++
++ if (activeTenant && data.tenantId && data.tenantId !== activeTenant.id) {
++   // Assurance encore liée à ancien locataire : considérer comme manquante pour le bail courant
++   return {
++     statut: "manquante",
++     resolu: "manquante",
++     joursAvantFin: null,
++     data,
++     tenantMismatch: true,
++   };
++ }
++
+  const statutStocke = data.statut || "manquante";
+  let joursAvantFin = null;
+  let resolu = statutStocke;
+
+  if (data.dateFin) {
+    const fin = new Date(String(data.dateFin).slice(0, 10) + "T12:00:00");
+    if (!isNaN(fin.getTime())) {
+      joursAvantFin = Math.floor((fin - now) / 86400000);
+      if (statutStocke === "valide") {
+        if (joursAvantFin < 0) resolu = "expiree";
+        else if (joursAvantFin <= 30) resolu = "bientot_expiree";
+      }
+    }
+  }
+  return { statut: statutStocke, resolu, joursAvantFin, data };
+};
+
+════════════════════════════════════════════════════════════════════════════════
+
+IMPACT CONSOMMATEURS :
+
+1. Dashboard (ligne 11115) :
+   if (st.resolu === "manquante") {
+     alertList.push({ type: "CRITIQUE", ... })  ← Créée maintenant si mismatch ✓
+   }
+
+2. B1-Remise Clés (ligne 30923) :
+   const _b1AssurValide = _b1AssurState.resolu === "valide";
+   → False si mismatch → case pas pré-cochée ✓
+
+3. Form Édition (ligne 38541) :
+   const existingData = existing.data || null;
+   → Data conservée si mismatch, resolu="manquante" ✓
+
+════════════════════════════════════════════════════════════════════════════════
+
+STATISTIQUES PATCH:
+
+- Fichier modifié : 1 (ImmoCle.jsx)
+- Localisations : 1 (fonction _getAssuranceLocataireState)
+- Lignes ajoutées : 14 lignes de logique
+- Lignes supprimées : 0
+- Comportement existant rompu : 0 ✓
+- Nouvelles fonctionnalités : 0
+- Mutations de store : 0
+
+════════════════════════════════════════════════════════════════════════════════
+
+TEST MATRIX (6 CAS):
+
+┌─────────┬─────────────────────┬──────────────────┬──────────────┬────────────────┐
+│ Test    │ Bien & Assurance    │ Tenant AVANT     │ Tenant APRÈS │ Comportement    │
+├─────────┼─────────────────────┼──────────────────┼──────────────┼────────────────┤
+│ 1       │ Bien loué, Valide   │ tenant_A         │ tenant_A     │ resolu='valide' │
+│ 2       │ Bien loué, Valide   │ tenant_A         │ tenant_B     │ resolu='mq'*    │
+│ 3       │ Bien vacant, Valide │ tenant_archived  │ (aucun)      │ resolu='exp'    │
+│ 4       │ Bien loué, A_verif  │ tenant_B         │ tenant_B     │ resolu='a_v'    │
+│ 5       │ Legacy+Valide       │ tenant_C         │ tenant_C     │ resolu='valide' │
+│ 6       │ Bien loué, Valide   │ tenant_D         │ tenant_D     │ resolu='bientot'│
+│         │ (15j avant expiry)  │                  │              │                 │
+└─────────┴─────────────────────┴──────────────────┴──────────────┴────────────────┘
+
+* = tenant mismatch : tenantMismatch=true, data conservée
+
+════════════════════════════════════════════════════════════════════════════════
+
+CONFORMITÉ MÉTIER :
+
+Règle PRÉ-PATCH:
+  "Si assurance.statut='valide' → état=valide, peu importe le tenant" ❌ BUG
+
+Règle POST-PATCH:
+  "Si assurance.statut='valide' ET tenant=actuel → état=valide" ✅ CORRECT
+  "Si assurance.statut='valide' ET tenant≠actuel → état=manquante" ✅ CORRECT
+
+════════════════════════════════════════════════════════════════════════════════
